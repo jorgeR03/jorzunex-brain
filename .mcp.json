@@ -1,0 +1,31 @@
+{
+  "$comment": "Servidores MCP compartidos del proyecto Cerebro JorZunex. Ver docs/mcp-setup.md para instrucciones de prueba, variables de entorno necesarias y estado de cada servidor. No hardcodear secretos aqui: usar ${VAR} / ${VAR:-default}, que Claude Code resuelve desde el entorno de shell de la sesion.",
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      }
+    },
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "${DATABASE_URL:-postgresql://brain:brain_dev_password@localhost:5432/jorzunex_brain}"
+      ]
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${CLAUDE_PROJECT_DIR:-.}/docs",
+        "${CLAUDE_PROJECT_DIR:-.}/prompts"
+      ]
+    }
+  }
+}
