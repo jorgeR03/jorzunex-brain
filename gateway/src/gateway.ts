@@ -109,6 +109,10 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
         disallowedTools: ["Write", "Edit", "Bash", "WebFetch", "WebSearch", "NotebookEdit"],
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
+        // Aísla la sesión de CLAUDE.md / settings de usuario y proyecto: el
+        // conocimiento del Brain debe salir SOLO de Read/Glob/Grep sobre
+        // docs/ y prompts/, no de contexto auto-cargado fuera de esas rutas.
+        settingSources: [],
         maxTurns: options.maxTurns ?? 15,
       },
     });
