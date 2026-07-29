@@ -1,25 +1,41 @@
-# gateway/ — Brain Gateway (PoC-1)
+# gateway/ — Brain Gateway (PoC-1 + PoC-2)
 
 Núcleo del Brain de JorZunex sobre **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`, TypeScript).
 
-## Qué hay implementado (PoC-1)
+## Qué hay implementado
 
-- **CLI `brain ask "<pregunta>"`** (`src/cli.ts`): llama a `query()` del Agent SDK
-  con acceso de **solo lectura** (Read/Glob/Grep, nunca Write/Edit/Bash) a los
-  Markdown de `/docs` y `/prompts` del repo — ese es el conocimiento del Brain.
-  Responde en español citando los archivos usados.
+- **CLI `brain ask "<pregunta>"`** (`src/cli.ts`): recupera primero contexto
+  relevante vía RAG (`Retriever` sobre pgvector) y lo pasa como fuente
+  principal; además mantiene acceso de **solo lectura** (Read/Glob/Grep,
+  nunca Write/Edit/Bash) a los Markdown de `/docs` y `/prompts` del repo como
+  respaldo/verificación. Responde en español citando los archivos usados.
 - **`ModelRouter`** (`src/modelRouter.ts`): única fuente de verdad de qué modelo
   se usa por tarea, según ADR-0001 §3. Ningún otro módulo debe escribir un
   string `"claude-..."` a mano.
 - **Persistencia dual** (`src/persistence/`): cada interacción (pregunta,
-  respuesta, herramientas, tokens, coste estimado, modelo) se guarda en
-  Postgres (preferido) o, si no está disponible, en un JSONL local
-  (`data/conversations.jsonl`, gitignored) — sin bloquear nunca al usuario.
+  respuesta, herramientas, tokens, coste estimado, modelo, si usó RAG y qué
+  fragmentos) se guarda en Postgres (preferido) o, si no está disponible, en
+  un JSONL local (`data/conversations.jsonl`, gitignored) — sin bloquear
+  nunca al usuario.
 - **Interfaz `Channel`** (`src/channels/types.ts`): contrato común para
   cualquier canal (CLI, web, Slack, WhatsApp), con soporte de audio y
   `outputMode: "voice" | "text"` desde el diseño inicial (ADR-0002).
+- **RAG (PoC-2)** — ingesta + retrieval sobre `docs/` y `prompts/`:
+  - **`Embedder`** (`src/embedder/`): interfaz + implementación local y
+    gratuita con `@xenova/transformers` (modelo
+    `Xenova/paraphrase-multilingual-MiniLM-L12-v2`, 384 dim, corre en CPU,
+    sin API externa ni coste — ADR-0001 §3 no permite proveedores de pago
+    para esto).
+  - **Ingesta** (`src/ingest/`, `npm run ingest`): recorre `docs/` y
+    `prompts/`, trocea cada Markdown por encabezados + ventanas solapadas de
+    ~400 palabras, genera embeddings y los guarda en `document_chunks`
+    (reemplazo idempotente por archivo). Script standalone — no usa n8n
+    todavía (no está desplegado).
+  - **`Retriever`** (`src/retriever/`): interfaz + implementación pgvector
+    (similaridad coseno, top-k). Ningún consumidor habla con Postgres
+    directamente.
 
-## Puesta en marcha (2 pasos)
+## Puesta en marcha
 
 ### 1. Instalar dependencias y configurar
 
@@ -54,7 +70,20 @@ docker compose up -d
 ```
 
 Si Docker no está instalado/corriendo, no pasa nada: el gateway usa el
-fallback JSONL automáticamente (`BRAIN_STORAGE_BACKEND=auto`).
+fallback JSONL automáticamente (`BRAIN_STORAGE_BACKEND=auto`) — pero el RAG
+(ingesta/retrieval) SÍ necesita Postgres+pgvector; sin él, `brain ask` cae
+automáticamente al acceso Read/Glob/Grep de solo lectura (sin RAG).
+
+### 3. Ingestar el conocimiento (una vez, y cada vez que cambie docs/prompts)
+
+```bash
+npm run ingest
+```
+
+Recorre `docs/` y `prompts/`, genera embeddings locales y los guarda en
+`document_chunks`. Tarda ~20-50s (la primera vez incluye descargar el modelo
+de Hugging Face, ~100MB, gratis). Reingestar es seguro: reemplaza los
+chunks de cada archivo sin duplicar.
 
 ## Uso
 
@@ -67,6 +96,8 @@ npm run ask -- ask "¿Qué base vectorial elegimos y por qué?"
 #   --allow-opus       autoriza claude-opus-5 (requiere --task agentic)
 #   --allow-fable      autoriza claude-fable-5 (DESACTIVADO por defecto)
 #   --channel <nombre> canal de origen registrado en la interacción
+#   --no-rag           desactiva el Retriever (solo Read/Glob/Grep)
+#   --top-k <n>        nº de fragmentos a recuperar (por defecto 6)
 ```
 
 Compilado (para producción / el binario `brain`):
