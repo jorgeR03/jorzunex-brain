@@ -17,3 +17,6 @@ actualizado: YYYY-MM-DD
 ```
 
 Esto es lo que el pilar 1 de `docs/VISION.md` ("sabe todo de mí y de mi equipo") necesita para funcionar. Empieza creando `jorge.md`.
+
+Ver también `docs/wiki/clientes/`, `docs/wiki/proyectos/` y `docs/wiki/procesos/` — misma
+idea de "un archivo por entidad", aplicada a clientes, proyectos y procesos de la empresa.

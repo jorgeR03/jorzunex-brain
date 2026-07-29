@@ -6,10 +6,22 @@ actualizado: 2026-07-29
 # JorZunex
 
 > Rellena y mantén este archivo actualizado — es lo primero que el Brain lee sobre la empresa.
+> Cada sección tiene preguntas guía entre paréntesis: contesta en 2-3 frases, no hace falta más.
 
 ## Qué hacemos
 
-_(pendiente: describir el negocio, servicios, propuesta de valor)_
+_(pendiente: ¿qué servicios ofrecemos? ¿a qué tipo de cliente? ¿qué nos diferencia?)_
+
+## Canales donde estamos presentes
+
+_(pendiente: ¿web, redes, marketplaces, referidos? ¿por dónde entra la mayoría de clientes hoy?
+esto alimenta el pilar 3 "genera ingresos" — canales existentes = donde el Brain puede ayudar
+a prospectar y dar seguimiento primero)_
+
+## Modelo de ingresos actual
+
+_(pendiente: ¿facturamos por proyecto, por horas, suscripción/retainer? ¿qué % de ingresos
+viene de qué servicio? no hace falta cifras exactas, con el modelo general basta)_
 
 ## Equipo
 
@@ -17,15 +29,16 @@ Ver `docs/wiki/equipo/` — un archivo por persona.
 
 ## Clientes activos
 
-_(pendiente — un archivo por cliente en `docs/wiki/clientes/` cuando exista contenido sensible; aquí solo el índice)_
+Índice en `docs/wiki/clientes/` — un archivo por cliente (contacto, historial, preferencias).
 
 ## Proyectos activos
 
-_(pendiente — un archivo por proyecto en `docs/wiki/proyectos/`)_
+Índice en `docs/wiki/proyectos/` — un archivo por proyecto (objetivo, estado, decisiones).
 
 ## Procesos clave
 
-_(pendiente — cómo se factura, cómo se capta un cliente, cómo se entrega un proyecto)_
+Índice en `docs/wiki/procesos/` — cómo se capta un cliente, cómo se factura, cómo se
+entrega un proyecto, onboarding de equipo.
 
 ## Objetivos actuales
 
