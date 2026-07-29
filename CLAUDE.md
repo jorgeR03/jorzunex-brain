@@ -19,7 +19,7 @@ El resto de la investigación (fases 1–10 del estudio) está en `docs/investig
 
 - Idioma con el usuario: **español**. Código e identificadores: inglés.
 - **No reinventar la rueda:** 80–90% herramientas existentes (stack cerrado en el resumen ejecutivo); código propio solo gateway, canales y prompts/políticas.
-- Modelo por defecto `claude-opus-5`; `claude-fable-5` solo para tareas críticas vía ModelRouter. Nunca hardcodear modelos fuera del ModelRouter.
+- Modelo por defecto `claude-sonnet-5` (ver ADR-0001 §3); `claude-opus-5`/`claude-fable-5` solo con autorización explícita vía ModelRouter. Nunca hardcodear modelos fuera del ModelRouter.
 - Acciones irreversibles → confirmación humana siempre.
 - Credenciales solo en variables de entorno / vaults; jamás en prompts o código.
 - Al terminar una sesión de trabajo: actualiza la tabla "Estado vivo" al final de `07-GUIA-PARA-AGENTES-CLAUDE.md`.
