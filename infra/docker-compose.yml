@@ -1,0 +1,37 @@
+# Infraestructura local de Cerebro JorZunex — fase F0/PoC-1 (coste 0€).
+#
+# Levanta Postgres 16 + pgvector como almacén de conversaciones y, en el
+# futuro (PoC-2), de embeddings para RAG. Ver docs/adr/ADR-0001-decisiones-fundacionales.md.
+#
+# Uso:
+#   cd infra
+#   cp ../gateway/.env.example ../gateway/.env   # si aún no existe
+#   docker compose up -d
+#   docker compose ps
+#
+# El gateway se conecta con las credenciales definidas en gateway/.env
+# (ver variables POSTGRES_* más abajo, deben coincidir).
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: jorzunex-brain-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-brain}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brain_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-jorzunex_brain}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - jorzunex_brain_pgdata:/var/lib/postgresql/data
+      - ../gateway/sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brain} -d ${POSTGRES_DB:-jorzunex_brain}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  jorzunex_brain_pgdata:
+    name: jorzunex_brain_pgdata
