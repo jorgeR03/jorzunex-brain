@@ -12,6 +12,8 @@ Opciones:
   --allow-opus      Autoriza claude-opus-5 cuando --task agentic (ADR-0001 §3).
   --allow-fable     Autoriza claude-fable-5 cuando --task critical (DESACTIVADO por defecto).
   --channel <nombre> Canal de origen (por defecto: "cli").
+  --no-rag          Desactiva el Retriever (RAG); usa solo Read/Glob/Grep.
+  --top-k <n>       Nº de fragmentos a recuperar del Retriever (por defecto 6).
 
 Ejemplos:
   brain ask "¿Qué base vectorial elegimos y por qué?"
@@ -36,6 +38,8 @@ async function main(): Promise<void> {
   let allowOpus = false;
   let allowFable = false;
   let channel = "cli";
+  let useRetrieval = true;
+  let topK: number | undefined;
 
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
@@ -49,11 +53,17 @@ async function main(): Promise<void> {
       case "--allow-fable":
         allowFable = true;
         break;
+      case "--no-rag":
+        useRetrieval = false;
+        break;
       case "--task":
         task = (rest[++i] as TaskType) ?? "default";
         break;
       case "--channel":
         channel = rest[++i] ?? "cli";
+        break;
+      case "--top-k":
+        topK = Number(rest[++i]);
         break;
       default:
         positional.push(arg);
@@ -78,11 +88,19 @@ async function main(): Promise<void> {
       task,
       allowOpus,
       allowFable,
+      useRetrieval,
+      topK,
     });
 
     console.log(result.answer);
     console.log("\n---");
     console.log(`Modelo: ${result.model}`);
+    console.log(`RAG: ${result.retrievalUsed ? `sí (${result.retrievedChunks.length} fragmento(s))` : "no (fallback a Read/Glob/Grep)"}`);
+    if (result.retrievedChunks.length > 0) {
+      for (const chunk of result.retrievedChunks) {
+        console.log(`  · ${chunk.sourcePath} [chunk ${chunk.chunkIndex}] score=${chunk.score.toFixed(3)}`);
+      }
+    }
     if (result.citations.length > 0) {
       console.log(`Citas: ${result.citations.join(", ")}`);
     }

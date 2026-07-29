@@ -35,17 +35,27 @@ CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations (create
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations (channel);
 CREATE INDEX IF NOT EXISTS idx_conversations_model ON conversations (model);
 
--- Reservado para PoC-2 (ingesta RAG): fragmentos de documentos + embeddings.
--- Se crea aquí para no exigir una segunda migración manual, pero no se usa
--- todavía en PoC-1.
+-- PoC-2 (ingesta RAG): fragmentos de documentos + embeddings.
+-- embedding vector(384): dimensión del embedder local por defecto
+-- (Xenova/paraphrase-multilingual-MiniLM-L12-v2, ver gateway/src/embedder/).
+-- Si se cambia de modelo/proveedor con otra dimensión, esta columna necesita
+-- una migración (ALTER TABLE ... TYPE vector(N)) — no hay reintento
+-- automático de dimensión.
 CREATE TABLE IF NOT EXISTS document_chunks (
     id          BIGSERIAL PRIMARY KEY,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     source_path TEXT NOT NULL,
     chunk_index INTEGER NOT NULL,
     content     TEXT NOT NULL,
-    embedding   vector(1536),
-    metadata    JSONB NOT NULL DEFAULT '{}'
+    embedding   vector(384),
+    metadata    JSONB NOT NULL DEFAULT '{}',
+    UNIQUE (source_path, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_chunks_source ON document_chunks (source_path);
+
+-- Sin índice ANN (ivfflat/hnsw) todavía: el corpus de docs/+prompts/ es
+-- pequeño (decenas de archivos) y una búsqueda exacta por coseno con
+-- sequential scan es rápida de sobra. Añadir un índice aproximado cuando el
+-- corpus crezca lo suficiente para justificarlo (no antes — "no sobre-ingeniería",
+-- ver docs/investigacion/07-GUIA-PARA-AGENTES-CLAUDE.md §4.7).

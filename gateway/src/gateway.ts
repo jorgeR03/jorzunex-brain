@@ -5,9 +5,13 @@ import { resolveModel, estimateCostUsd, type TaskType } from "./modelRouter.js";
 import { createConversationStore } from "./persistence/index.js";
 import type { ConversationRecord } from "./persistence/types.js";
 import type { OutputMode } from "./channels/types.js";
+import { createRetriever } from "./retriever/index.js";
+import type { RetrievedChunk } from "./retriever/types.js";
 
 /** Herramientas de solo lectura permitidas al Brain: nunca Write/Edit/Bash. */
 const READ_ONLY_TOOLS = ["Read", "Glob", "Grep"] as const;
+
+const DEFAULT_TOP_K = 6;
 
 const KNOWLEDGE_SYSTEM_PROMPT = `Eres el Brain de JorZunex, el asistente interno de la empresa.
 
@@ -15,6 +19,12 @@ Tu conocimiento son EXCLUSIVAMENTE los archivos Markdown dentro de las carpetas
 "docs/" y "prompts/" de este repositorio (investigación, ADRs, visión, wiki y
 prompts versionados). Tienes acceso de SOLO LECTURA (Read, Glob, Grep) — no
 puedes ni debes intentar modificar, crear ni borrar nada.
+
+Si el mensaje del usuario incluye un bloque "Contexto recuperado
+automáticamente (RAG)", trátalo como tu fuente PRINCIPAL para responder —
+viene de una búsqueda por similaridad semántica sobre docs/ y prompts/ y ya
+está filtrado por relevancia. Usa Read/Glob/Grep solo para verificar un
+detalle puntual o ampliar algo que el contexto no cubra del todo.
 
 Reglas de respuesta:
 - Responde SIEMPRE en español, con precisión y sin inventar información que
@@ -36,6 +46,16 @@ export interface AskBrainOptions {
   allowOpus?: boolean;
   allowFable?: boolean;
   maxTurns?: number;
+  /** Usa el Retriever (RAG) para recuperar contexto antes de preguntar. Por defecto true. */
+  useRetrieval?: boolean;
+  /** Nº de fragmentos a recuperar del Retriever. Por defecto 6. */
+  topK?: number;
+}
+
+export interface RetrievedChunkInfo {
+  sourcePath: string;
+  chunkIndex: number;
+  score: number;
 }
 
 export interface AskBrainResult {
@@ -53,6 +73,9 @@ export interface AskBrainResult {
   errorMessage?: string;
   durationMs: number;
   refusal: boolean;
+  /** true si el Retriever (pgvector) estaba disponible y aportó contexto. */
+  retrievalUsed: boolean;
+  retrievedChunks: RetrievedChunkInfo[];
 }
 
 function extractFilePath(input: unknown): string | undefined {
@@ -65,10 +88,23 @@ function extractFilePath(input: unknown): string | undefined {
   return relative.replace(/\\/g, "/");
 }
 
+/** Construye el bloque de contexto RAG a partir de los chunks recuperados. */
+function buildRagContextBlock(chunks: RetrievedChunk[]): string {
+  return chunks
+    .map(
+      (chunk, i) =>
+        `[${i + 1}] ${chunk.sourcePath} (fragmento ${chunk.chunkIndex}, similaridad=${chunk.score.toFixed(3)}):\n"""\n${chunk.content}\n"""`,
+    )
+    .join("\n\n");
+}
+
 /**
- * Núcleo del gateway: responde una pregunta usando el Claude Agent SDK con
- * acceso de solo lectura a docs/ y prompts/, y persiste la interacción
- * completa (Postgres o JSONL, según disponibilidad).
+ * Núcleo del gateway: responde una pregunta usando el Claude Agent SDK.
+ * Primero intenta recuperar contexto relevante vía `Retriever` (RAG sobre
+ * pgvector); si está disponible, se lo pasa como contexto principal. En
+ * cualquier caso mantiene acceso de solo lectura (Read/Glob/Grep) a docs/ y
+ * prompts/ como respaldo/verificación. Persiste la interacción completa
+ * (Postgres o JSONL, según disponibilidad).
  */
 export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult> {
   const config = loadConfig();
@@ -97,9 +133,32 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
   let errorMessage: string | undefined;
   let refusal = false;
 
+  // --- Retrieval (RAG) ------------------------------------------------
+  let retrievedChunks: RetrievedChunk[] = [];
+  const retriever = options.useRetrieval === false ? null : await createRetriever(config);
+  if (retriever) {
+    try {
+      retrievedChunks = await retriever.retrieve(options.question, options.topK ?? DEFAULT_TOP_K);
+      for (const chunk of retrievedChunks) citations.add(chunk.sourcePath);
+    } catch (error) {
+      process.stderr.write(
+        `[brain] Aviso: falló la recuperación RAG (${
+          error instanceof Error ? error.message : String(error)
+        }). Se continúa solo con Read/Glob/Grep.\n`,
+      );
+    }
+  }
+
+  const prompt =
+    retrievedChunks.length > 0
+      ? `Contexto recuperado automáticamente (RAG) de la base de conocimiento:\n\n${buildRagContextBlock(
+          retrievedChunks,
+        )}\n\n---\n\nPregunta del usuario: ${options.question}`
+      : options.question;
+
   try {
     const stream = query({
-      prompt: options.question,
+      prompt,
       options: {
         model,
         cwd: REPO_ROOT,
@@ -110,8 +169,9 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         // Aísla la sesión de CLAUDE.md / settings de usuario y proyecto: el
-        // conocimiento del Brain debe salir SOLO de Read/Glob/Grep sobre
-        // docs/ y prompts/, no de contexto auto-cargado fuera de esas rutas.
+        // conocimiento del Brain debe salir SOLO del contexto RAG y/o de
+        // Read/Glob/Grep sobre docs/ y prompts/, no de contexto auto-cargado
+        // fuera de esas rutas.
         settingSources: [],
         maxTurns: options.maxTurns ?? 15,
       },
@@ -145,6 +205,8 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
   } catch (error) {
     isError = true;
     errorMessage = error instanceof Error ? error.message : String(error);
+  } finally {
+    await retriever?.close().catch(() => undefined);
   }
 
   // Manejo explícito de stop_reason "refusal": mensaje claro al usuario en
@@ -160,6 +222,11 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
   }
 
   const durationMs = Date.now() - startedAt;
+  const retrievedChunkInfo: RetrievedChunkInfo[] = retrievedChunks.map((c) => ({
+    sourcePath: c.sourcePath,
+    chunkIndex: c.chunkIndex,
+    score: c.score,
+  }));
 
   const record: ConversationRecord = {
     createdAt: new Date(startedAt).toISOString(),
@@ -179,7 +246,7 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
     isError,
     errorMessage,
     durationMs,
-    metadata: { outputMode, refusal },
+    metadata: { outputMode, refusal, retrievalUsed: retrievedChunks.length > 0, retrievedChunks: retrievedChunkInfo },
   };
 
   const store = await createConversationStore(config);
@@ -211,5 +278,7 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
     errorMessage,
     durationMs,
     refusal,
+    retrievalUsed: retrievedChunks.length > 0,
+    retrievedChunks: retrievedChunkInfo,
   };
 }
