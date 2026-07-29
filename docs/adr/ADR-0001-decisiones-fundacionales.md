@@ -8,10 +8,14 @@
 
 La investigación (`docs/investigacion/00-RESUMEN-EJECUTIVO.md §5`) dejó 3 decisiones bloqueantes. El usuario delegó la elección con una restricción dominante: **minimizar coste mensual**.
 
-## Decisión 1 — Wiki: docs-as-code primero, Outline self-hosted después
+## Decisión 1 — Wiki: docs-as-code + Obsidian como UI (Outline se aplaza indefinidamente)
 
-- **Fase 0 (coste 0€):** todo el conocimiento en **Markdown dentro del repo** (`/docs`, `/prompts`, wiki en `/docs/wiki/`). El Brain lo lee gratis con las herramientas nativas del Agent SDK (Glob/Grep/Read). Sin servicio que pagar ni mantener.
-- **Fase 1+ (cuando exista el VPS):** desplegar **Outline** en el mismo VPS vía Coolify para el equipo no técnico. Su export Markdown mantiene la compatibilidad con el corpus RAG.
+> **Actualizada 2026-07-29** (mismo día, con más información): Jorge mencionó Obsidian como opción; se adopta porque es un upgrade estrictamente mejor con el mismo coste (0€).
+
+- **Base (ya vigente, coste 0€):** todo el conocimiento en **Markdown dentro del repo** (`/docs`, `/prompts`, wiki en `/docs/wiki/`). El Brain lo lee gratis con las herramientas nativas del Agent SDK (Glob/Grep/Read).
+- **UI para humanos: Obsidian** (gratis, uso personal/equipo pequeño) apuntando a `/docs` (o a `/docs/wiki` si se prefiere acotado) como *vault*. Da editor WYSIWYG-ish, backlinks, grafo de conocimiento y búsqueda — sobre los mismos archivos que ya usa el Brain, sin duplicar nada.
+- **Sincronización entre el equipo: Git, no Obsidian Sync (que cuesta $4–8/usuario/mes).** El plugin comunitario **Obsidian Git** hace commit/push/pull automático sobre el mismo repo. Coste: 0€. Ver `docs/obsidian-setup.md`.
+- **Outline queda aplazado indefinidamente**, no solo "hasta que exista el VPS": mientras Obsidian+Git cubra la necesidad (edición cómoda + colaboración), no hay razón para pagar el coste operativo de desplegar y mantener Outline. Se reevalúa solo si el equipo crece más allá de quien puede usar Git/Obsidian cómodamente, o si se necesita edición colaborativa en tiempo real tipo Google Docs.
 - **Notion descartado:** $10/usuario/mes no se justifica con el presupuesto actual.
 
 ## Decisión 2 — Hosting: VPS único + Coolify (Escenario A del estudio)
