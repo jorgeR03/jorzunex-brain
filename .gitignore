@@ -3,3 +3,6 @@ node_modules/
 *.log
 dist/
 .DS_Store
+
+# Fallback JSONL de persistencia del gateway (ver gateway/src/persistence/jsonl.ts)
+gateway/data/
