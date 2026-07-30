@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { askBrain } from "./gateway.js";
+import { runDevTask, DevAgentError } from "./devAgent.js";
 import type { TaskType } from "./modelRouter.js";
 import type { OutputMode } from "./channels/types.js";
 
@@ -65,6 +66,55 @@ app.post("/ask", async (req, res) => {
   }
 });
 
+interface DevTaskRequestBody {
+  project?: string;
+  instruction?: string;
+  allowDeploy?: boolean;
+  allowOpus?: boolean;
+}
+
+/**
+ * Atlas en modo desarrollador: modifica código REAL de un proyecto bajo
+ * ProyectosJorZunex (nunca este repo del Brain). Cualquier comando de
+ * despliegue/publicación queda bloqueado salvo `allowDeploy: true` — ver
+ * gateway/src/devAgent.ts para el guardarraíl completo. Sin autenticación
+ * propia (igual que /ask): no exponer fuera de localhost sin un proxy con
+ * login delante.
+ */
+app.post("/dev-task", async (req, res) => {
+  const body = req.body as DevTaskRequestBody;
+
+  if (!body.project || !body.project.trim()) {
+    res.status(400).json({ error: "El campo 'project' es obligatorio." });
+    return;
+  }
+  if (!body.instruction || !body.instruction.trim()) {
+    res.status(400).json({ error: "El campo 'instruction' es obligatorio." });
+    return;
+  }
+
+  try {
+    const result = await runDevTask({
+      project: body.project,
+      instruction: body.instruction,
+      allowDeploy: body.allowDeploy ?? false,
+      allowOpus: body.allowOpus ?? false,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof DevAgentError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    res.status(500).json({
+      error: "Error interno al ejecutar la tarea de desarrollo.",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 app.listen(PORT, () => {
-  process.stdout.write(`[brain-server] Escuchando en http://localhost:${PORT} (POST /ask, GET /health)\n`);
+  process.stdout.write(
+    `[brain-server] Escuchando en http://localhost:${PORT} (POST /ask, POST /dev-task, GET /health)\n`,
+  );
 });
