@@ -12,6 +12,13 @@ export const REPO_ROOT = path.resolve(GATEWAY_ROOT, "..");
 
 export type StorageBackend = "postgres" | "jsonl" | "auto";
 
+export interface LangfuseConfig {
+  /** undefined => integración desactivada (no rompe nada si no está configurada). */
+  publicKey?: string;
+  secretKey?: string;
+  baseUrl: string;
+}
+
 export interface BrainConfig {
   anthropicApiKey?: string;
   storageBackend: StorageBackend;
@@ -21,6 +28,7 @@ export interface BrainConfig {
   jsonlPath: string;
   /** Directorios (relativos a REPO_ROOT) que forman el conocimiento del Brain. */
   knowledgeDirs: string[];
+  langfuse: LangfuseConfig;
 }
 
 function buildPostgresConnectionString(): string {
@@ -46,5 +54,10 @@ export function loadConfig(): BrainConfig {
     },
     jsonlPath: process.env.BRAIN_JSONL_PATH ?? path.join(GATEWAY_ROOT, "data", "conversations.jsonl"),
     knowledgeDirs: ["docs", "prompts"],
+    langfuse: {
+      publicKey: process.env.LANGFUSE_PUBLIC_KEY,
+      secretKey: process.env.LANGFUSE_SECRET_KEY,
+      baseUrl: process.env.LANGFUSE_BASE_URL ?? "http://localhost:3000",
+    },
   };
 }

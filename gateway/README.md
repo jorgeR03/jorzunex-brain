@@ -34,6 +34,13 @@ Núcleo del Brain de JorZunex sobre **Claude Agent SDK** (`@anthropic-ai/claude-
   - **`Retriever`** (`src/retriever/`): interfaz + implementación pgvector
     (similaridad coseno, top-k). Ningún consumidor habla con Postgres
     directamente.
+- **Observabilidad (F2)** — `src/observability/langfuse.ts`: cada `askBrain`
+  se traza en Langfuse (modelo, tokens, coste, herramientas, citas, si hubo
+  RAG) vía el SDK oficial `langfuse`. **Opcional y best-effort**: si
+  `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` no están en `.env`, la
+  integración queda desactivada silenciosamente — nunca rompe ni retrasa una
+  respuesta. Verificado extremo a extremo: `brain ask` → traza real
+  confirmada leyendo `GET /api/public/traces` de Langfuse.
 
 ## Puesta en marcha
 
@@ -73,6 +80,12 @@ Si Docker no está instalado/corriendo, no pasa nada: el gateway usa el
 fallback JSONL automáticamente (`BRAIN_STORAGE_BACKEND=auto`) — pero el RAG
 (ingesta/retrieval) SÍ necesita Postgres+pgvector; sin él, `brain ask` cae
 automáticamente al acceso Read/Glob/Grep de solo lectura (sin RAG).
+
+Este mismo `docker compose up -d` también levanta n8n y Langfuse (ver
+`infra/README.md`). Para conectar el gateway a Langfuse, crea el par de
+claves (UI en http://localhost:3000, o auto-provisión sin UI vía
+`LANGFUSE_INIT_*` en `infra/.env` — ver `infra/README.md`) y pégalas en
+`gateway/.env` (`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`).
 
 ### 3. Ingestar el conocimiento (una vez, y cada vez que cambie docs/prompts)
 

@@ -7,6 +7,7 @@ import type { ConversationRecord } from "./persistence/types.js";
 import type { OutputMode } from "./channels/types.js";
 import { createRetriever } from "./retriever/index.js";
 import type { RetrievedChunk } from "./retriever/types.js";
+import { traceAskBrain } from "./observability/langfuse.js";
 
 /** Herramientas de solo lectura permitidas al Brain: nunca Write/Edit/Bash. */
 const READ_ONLY_TOOLS = ["Read", "Glob", "Grep"] as const;
@@ -263,7 +264,7 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
     await store.close().catch(() => undefined);
   }
 
-  return {
+  const result: AskBrainResult = {
     answer,
     model,
     toolsUsed: Array.from(toolsUsed),
@@ -281,4 +282,9 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
     retrievalUsed: retrievedChunks.length > 0,
     retrievedChunks: retrievedChunkInfo,
   };
+
+  // Best-effort: nunca debe romper ni retrasar la respuesta al usuario.
+  await traceAskBrain(config, options, result).catch(() => undefined);
+
+  return result;
 }
