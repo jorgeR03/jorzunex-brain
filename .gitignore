@@ -6,3 +6,11 @@ dist/
 
 # Fallback JSONL de persistencia del gateway (ver gateway/src/persistence/jsonl.ts)
 gateway/data/
+
+# Obsidian: config específica de esta máquina (layout de ventanas, tema local).
+# SÍ se versiona community-plugins.json y plugins/ (para que el equipo comparta
+# el plugin Git ya instalado) — ver docs/obsidian-setup.md.
+docs/.obsidian/workspace.json
+docs/.obsidian/workspace-mobile.json
+docs/.obsidian/app.json
+docs/.obsidian/appearance.json

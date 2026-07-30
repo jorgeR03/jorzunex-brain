@@ -16,7 +16,7 @@ Obsidian es una app gratuita (Windows/Mac/Linux/móvil) que convierte una carpet
 
 Obsidian Sync cuesta $4–8/usuario/mes. En vez de eso, usamos el repo git que ya existe:
 
-1. Dentro de Obsidian: **Settings → Community plugins → Browse** → instala **"Obsidian Git"**.
+1. Dentro de Obsidian: **Settings → Community plugins** → si aparece "Restricted mode", actívalo a **OFF** ("Turn on community plugins") — el botón **Browse** solo aparece después de eso. Luego **Browse** → busca **"Git"** (el nombre exacto en el marketplace es solo "Git", autor Vinzent — buscar "Obsidian Git" completo puede no encontrarlo) → instala y activa.
 2. Actívalo y configura (Settings del plugin):
    - **Vault backup interval**: cada 10–15 min (auto-commit + push).
    - **Auto pull on Obsidian launch**: activado.
