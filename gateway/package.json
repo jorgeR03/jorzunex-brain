@@ -13,6 +13,7 @@
     "brain": "tsx src/cli.ts",
     "dev": "tsx watch src/cli.ts",
     "ingest": "tsx src/ingest/run.ts",
+    "ingest:projects": "tsx src/ingest/runProjects.ts",
     "server": "tsx src/server.ts",
     "server:dev": "tsx watch src/server.ts",
     "typecheck": "tsc -p . --noEmit"

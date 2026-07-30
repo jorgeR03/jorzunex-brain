@@ -1,7 +1,7 @@
 # ADR-0003 — Atlas: de asistente de lectura a asistente unificado (Jarvis)
 
-- **Fecha:** 2026-07-30
-- **Estado:** Propuesta — pendiente de confirmación de Jorge en los puntos marcados ⚠️
+- **Fecha:** 2026-07-30 (decisiones ⚠️ cerradas el mismo día)
+- **Estado:** Aceptada
 - **Contexto:** Jorge redefinió la visión del proyecto: no un chatbot con funciones sueltas, sino **una sola inteligencia** (Atlas) que conoce su contexto completo, ejecuta trabajo real, pide autorización cuando corresponde y actúa con autonomía hasta terminar. Este ADR mapea esa visión a la arquitectura ya construida — extendiéndola, no reescribiéndola — y deja explícito el porqué de cada pieza antes de tocar código.
 
 ## Incidente que motiva parte de este diseño
@@ -29,7 +29,21 @@ Antes de este ADR, se detectó y corrigió un fallo real de seguridad: el primer
 | 11 | Una sola identidad, sin sentir módulos separados | — | **Este es el cambio de diseño central de este ADR**: un orquestador que decide qué herramienta usar, no un menú de modos |
 | 12 | Estilo "Alexa": controlar luces/dispositivos de la oficina, activarse al decir "Atlas" y responder qué puede hacer | — | ⚠️ **Requiere investigación previa que no puedo hacer sin datos de Jorge**: ¿qué hardware hay ya en la oficina? (enchufes/bombillos Wi-Fi tipo Tuya/SmartLife, Zigbee con hub, Google Home/Alexa ya instalados, Home Assistant, nada todavía). La respuesta cambia por completo el diseño y el coste. El "wake word" (activarse al decir "Atlas") es un desarrollo aparte del control de dispositivos — se puede prototipar con la Web Speech API (escucha continua filtrando la palabra "Atlas") independientemente de qué hardware se decida para las luces |
 
-## ⚠️ Decisión que necesito que confirmes: cómo funciona "el espacio de trabajo de José"
+## Decisión cerrada 1 — espacios de trabajo: Opción A confirmada
+
+Jorge confirmó (2026-07-30): **una sola instancia central**, ampliable a un tercer usuario en el futuro (equipo puede crecer más allá de él y José). Cada persona tiene su sección de datos dentro del mismo sistema — no hay instancias separadas por máquina.
+
+## Decisión cerrada 2 — prioridad real: profundidad del cerebro, no IoT
+
+Jorge fue explícito: el control de luces/TV estilo Alexa **queda en segundo plano** ("una que otra cosa" en la oficina, sin urgencia). Lo que sí importa, en este orden:
+
+1. **Que el cerebro tenga conocimiento profundo y real de todos los proyectos** — no solo los resúmenes curados de `docs/wiki/proyectos/`, sino la documentación técnica real de cada repo (READMEs, `docs/`, ADRs propios de cada proyecto, `CLAUDE.md`).
+2. **Administración de proyectos** (estado, tareas, decisiones — el punto 2/4 de la tabla de arriba).
+3. **Resolución de dudas de ingeniería** sobre esos proyectos reales (el punto 5, con más contexto disponible gracias al punto 1).
+
+Punto 12 (Alexa/IoT) pasa a backlog sin fecha — se retoma cuando el resto esté sólido.
+
+## ⚠️ Decisión que necesito que confirmes: cómo funciona "el espacio de trabajo de José" (histórico, ya resuelta arriba)
 
 Hay dos formas honestas de construir esto, con implicaciones muy distintas de coste/complejidad:
 
