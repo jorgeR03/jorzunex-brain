@@ -1,18 +1,29 @@
-# Infraestructura local de Cerebro JorZunex — fase F0/PoC-1 (coste 0€).
+# Infraestructura local de Cerebro JorZunex — fase F0/PoC-1/PoC-2/F2 (coste 0€).
 #
-# Levanta Postgres 16 + pgvector como almacén de conversaciones y, en el
-# futuro (PoC-2), de embeddings para RAG. Ver docs/adr/ADR-0001-decisiones-fundacionales.md.
+# Servicios:
+#   - postgres            Postgres 16 + pgvector: conversaciones + embeddings RAG (F0/PoC-1/PoC-2)
+#   - n8n                 Automatización (F2) — SQLite interno, sin Postgres propio
+#   - langfuse-*           Observabilidad (F2) — trazas/costes/evals del gateway (aún NO conectado, ver infra/README.md)
+#
+# Ver docs/adr/ADR-0001-decisiones-fundacionales.md y docs/investigacion/05-roadmap-pocs-backlog.md (F2).
 #
 # Uso:
 #   cd infra
+#   cp .env.example .env   # si aún no existe; rellena/edita secretos antes de exponer nada fuera de tu máquina
 #   cp ../gateway/.env.example ../gateway/.env   # si aún no existe
 #   docker compose up -d
 #   docker compose ps
 #
 # El gateway se conecta con las credenciales definidas en gateway/.env
-# (ver variables POSTGRES_* más abajo, deben coincidir).
+# (ver variables POSTGRES_* más abajo, deben coincidir). n8n y Langfuse
+# usan sus propias variables LANGFUSE_*/N8N_* definidas en infra/.env
+# (ver infra/.env.example) — son independientes del Postgres del Brain,
+# así que un fallo o reinicio de Langfuse/n8n no afecta al Postgres ya en uso.
+#
+# Detalle de decisiones (ClickHouse, puertos, etc.) en infra/README.md.
 
 services:
+  # --- Brain: Postgres + pgvector (ya en uso desde PoC-1, no tocar) --------
   postgres:
     image: pgvector/pgvector:pg16
     container_name: jorzunex-brain-postgres
@@ -32,6 +43,200 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- n8n: automatización (F2) --------------------------------------------
+  # Base de datos propia: SQLite interno (volumen), la opción más simple para
+  # fase local — nada que administrar aparte, sin tocar el Postgres del Brain.
+  # Reevaluar Postgres propio solo si el volumen de ejecuciones lo justifica.
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: jorzunex-n8n
+    restart: unless-stopped
+    environment:
+      GENERIC_TIMEZONE: ${N8N_TIMEZONE:-America/Bogota}
+      TZ: ${N8N_TIMEZONE:-America/Bogota}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      N8N_SECURE_COOKIE: "false"
+      N8N_RUNNERS_ENABLED: "true"
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - jorzunex_n8n_data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # --- Langfuse: observabilidad (F2) ---------------------------------------
+  # Requiere Postgres (transaccional) + ClickHouse (trazas/OLAP) + Redis
+  # (colas/caché) + almacenamiento S3 (eventos/medios) — las 4 piezas son
+  # OBLIGATORIAS en la versión actual (langfuse/langfuse:3), no opcionales.
+  # Ver infra/README.md §Langfuse para el porqué y las alternativas evaluadas.
+  # Postgres propio y separado del Postgres del Brain (aislar fallos entre servicios).
+  langfuse-postgres:
+    image: postgres:16-alpine
+    container_name: jorzunex-langfuse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LANGFUSE_POSTGRES_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-langfuse_dev_password}
+      POSTGRES_DB: ${LANGFUSE_POSTGRES_DB:-langfuse}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:${LANGFUSE_POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - jorzunex_langfuse_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_POSTGRES_USER:-langfuse} -d ${LANGFUSE_POSTGRES_DB:-langfuse}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    container_name: jorzunex-langfuse-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse_dev_password}
+    ports:
+      - "127.0.0.1:${LANGFUSE_CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${LANGFUSE_CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - jorzunex_langfuse_clickhouse_data:/var/lib/clickhouse
+      - jorzunex_langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    container_name: jorzunex-langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER:-langfuse_minio}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:-langfuse_minio_dev_password}
+    ports:
+      - "${LANGFUSE_MINIO_PORT:-9090}:9000"
+      - "127.0.0.1:${LANGFUSE_MINIO_CONSOLE_PORT:-9091}:9001"
+    volumes:
+      - jorzunex_langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 2s
+
+  langfuse-redis:
+    image: redis:7-alpine
+    container_name: jorzunex-langfuse-redis
+    restart: unless-stopped
+    command: >
+      --requirepass ${LANGFUSE_REDIS_AUTH:-langfuse_redis_dev_password}
+      --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:${LANGFUSE_REDIS_PORT:-6379}:6379"
+    volumes:
+      - jorzunex_langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: jorzunex-langfuse-worker
+    restart: unless-stopped
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment: &langfuse-env
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
+      DATABASE_URL: ${LANGFUSE_DATABASE_URL:-postgresql://langfuse:langfuse_dev_password@langfuse-postgres:5432/langfuse}
+      SALT: ${LANGFUSE_SALT:-jorzunex_dev_salt_changeme}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "true"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse_dev_password}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-langfuse_minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-langfuse_minio_dev_password}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-langfuse_minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-langfuse_minio_dev_password}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-langfuse_redis_dev_password}
+      REDIS_TLS_ENABLED: "false"
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: jorzunex-langfuse-web
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-jorzunex_dev_nextauth_secret_changeme}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+
 volumes:
   jorzunex_brain_pgdata:
     name: jorzunex_brain_pgdata
+  jorzunex_n8n_data:
+    name: jorzunex_n8n_data
+  jorzunex_langfuse_pgdata:
+    name: jorzunex_langfuse_pgdata
+  jorzunex_langfuse_clickhouse_data:
+    name: jorzunex_langfuse_clickhouse_data
+  jorzunex_langfuse_clickhouse_logs:
+    name: jorzunex_langfuse_clickhouse_logs
+  jorzunex_langfuse_minio_data:
+    name: jorzunex_langfuse_minio_data
+  jorzunex_langfuse_redis_data:
+    name: jorzunex_langfuse_redis_data
