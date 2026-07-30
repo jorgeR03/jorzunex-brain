@@ -14,6 +14,7 @@
     "dev": "tsx watch src/cli.ts",
     "ingest": "tsx src/ingest/run.ts",
     "ingest:projects": "tsx src/ingest/runProjects.ts",
+    "watch:ingest": "tsx src/ingest/watch.ts",
     "server": "tsx src/server.ts",
     "server:dev": "tsx watch src/server.ts",
     "typecheck": "tsc -p . --noEmit"
@@ -21,6 +22,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.220",
     "@xenova/transformers": "^2.17.2",
+    "chokidar": "^5.0.0",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
