@@ -1,26 +1,120 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap");
 @import "tailwindcss";
 
+/*
+ * Paleta real de JorZunex Solutions (extraída de jorzunex.github.io vía
+ * getComputedStyle, no inventada): fondo casi negro azulado, acentos
+ * cian/azul/morado en gradiente, fuente Outfit. Ver
+ * docs/wiki/proyectos/pagina-web-jorzunex.md.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #040810;
+  --bg2: #070d1a;
+  --bg3: #0c1628;
+  --foreground: #e8f4ff;
+  --text-dim: #7d97b4;
+  --neon: #00c8ff;
+  --neon2: #3d6eff;
+  --purple: #7b4fff;
+  --border: rgba(0, 200, 255, 0.14);
+  --border-hi: rgba(0, 200, 255, 0.4);
+  --card: rgba(10, 20, 40, 0.55);
+  --grad: linear-gradient(135deg, #3d6eff, #00c8ff);
+  --grad3: linear-gradient(90deg, #3d6eff, #00c8ff, #7b4fff);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
 }
 
 body {
-  background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  background-color: var(--background);
+  /* Fondo con textura tipo circuito/estrellas (inspirado en jorzunex.github.io,
+     construido con CSS puro — no es una captura de su sitio): puntos finos
+     dispersos + dos glows radiales suaves en las esquinas. */
+  background-image:
+    radial-gradient(circle at 15% 20%, rgba(0, 200, 255, 0.05), transparent 45%),
+    radial-gradient(circle at 85% 75%, rgba(123, 79, 255, 0.06), transparent 45%),
+    radial-gradient(rgba(0, 200, 255, 0.35) 0.6px, transparent 0.6px);
+  background-size:
+    auto,
+    auto,
+    26px 26px;
+  background-position:
+    0 0,
+    0 0,
+    0 0;
+}
+
+.jorzunex-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0.8px solid var(--border);
+  border-radius: 8px;
+  background: rgba(6, 14, 28, 0.8);
+  padding: 4px 10px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
+@keyframes brain-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+@keyframes brain-ring-listen {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+@keyframes brain-ring-speak {
+  0%,
+  100% {
+    transform: scaleY(0.4);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes brain-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-brain-breathe {
+  animation: brain-breathe 3.2s ease-in-out infinite;
+}
+
+.animate-brain-ring-listen {
+  animation: brain-ring-listen 1.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.animate-brain-spin {
+  animation: brain-spin 1.6s linear infinite;
+}
+
+.brain-speak-bar {
+  animation: brain-ring-speak 0.5s ease-in-out infinite;
+  transform-origin: center;
 }
