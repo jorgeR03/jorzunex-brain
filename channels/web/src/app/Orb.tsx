@@ -6,7 +6,7 @@ const STATE_LABEL: Record<AssistantState, string> = {
   idle: "Atlas en espera",
   listening: "Escuchando…",
   thinking: "Pensando…",
-  speaking: "Hablando…",
+  speaking: "Hablando… (clic para interrumpir)",
 };
 
 /**

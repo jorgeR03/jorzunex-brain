@@ -67,7 +67,11 @@ Reglas de respuesta:
   Atlas, con su propio guardarraíl de autorización.`;
 
 const VOICE_SUFFIX =
-  "\n\nModo de salida: VOZ. Responde en frases cortas, sin Markdown, sin tablas ni listas con viñetas — texto plano apto para síntesis de voz (TTS).";
+  "\n\nModo de salida: VOZ. Responde en frases cortas, sin Markdown, sin tablas ni listas con viñetas — texto plano apto para síntesis de voz (TTS). " +
+  "La velocidad se gana evitando verificaciones DE ARCHIVO redundantes (Read/Glob/Grep) cuando el contexto RAG ya recuperado " +
+  "es suficiente para responder con seguridad — úsalos solo si la pregunta es imposible de responder sin verificar un archivo puntual, no por rutina. " +
+  "Esto NO significa dar respuestas superficiales: sigue razonando y argumentando con el mismo rigor de siempre — para preguntas que lo ameriten, " +
+  "explica el porqué, no solo el qué. Reserva las respuestas de una frase para cosas genuinamente simples (saludos, confirmaciones, datos puntuales).";
 
 export interface AskBrainOptions {
   question: string;
@@ -81,6 +85,14 @@ export interface AskBrainOptions {
   useRetrieval?: boolean;
   /** Nº de fragmentos a recuperar del Retriever. Por defecto 6. */
   topK?: number;
+  /**
+   * ID de sesión del Claude Agent SDK a retomar (viene de `sessionId` en la
+   * respuesta anterior). Sin esto, cada pregunta es una conversación nueva
+   * y aislada — Atlas no recuerda nada de lo que se habló antes en el mismo
+   * chat. El canal (web) debe guardarlo tras la primera respuesta y
+   * reenviarlo en cada pregunta siguiente de la misma conversación.
+   */
+  sessionId?: string;
 }
 
 export interface RetrievedChunkInfo {
@@ -107,6 +119,8 @@ export interface AskBrainResult {
   /** true si el Retriever (pgvector) estaba disponible y aportó contexto. */
   retrievalUsed: boolean;
   retrievedChunks: RetrievedChunkInfo[];
+  /** ID de sesión del Claude Agent SDK — reenviar en `AskBrainOptions.sessionId` para que la siguiente pregunta recuerde esta conversación. */
+  sessionId?: string;
 }
 
 function extractFilePath(input: unknown): string | undefined {
@@ -163,6 +177,7 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
   let isError = false;
   let errorMessage: string | undefined;
   let refusal = false;
+  let sessionId: string | undefined;
 
   // --- Retrieval (RAG) ------------------------------------------------
   let retrievedChunks: RetrievedChunk[] = [];
@@ -209,7 +224,14 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
         // Read/Glob/Grep sobre docs/ y prompts/, no de contexto auto-cargado
         // fuera de esas rutas.
         settingSources: [],
-        maxTurns: options.maxTurns ?? 15,
+        // Voz prioriza velocidad: menos turnos disponibles empuja a responder
+        // directo con el RAG en vez de encadenar varias verificaciones.
+        maxTurns: options.maxTurns ?? (outputMode === "voice" ? 6 : 15),
+        // Retoma la sesión anterior si el canal la pasó — así Atlas SÍ
+        // recuerda lo hablado antes en la misma conversación. Sin esto,
+        // cada pregunta era una sesión nueva y aislada (bug reportado por
+        // Jorge: "no está guardando contexto").
+        ...(options.sessionId ? { resume: options.sessionId } : {}),
       },
     });
 
@@ -225,6 +247,7 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
       } else if (message.type === "result") {
         stopReason = message.stop_reason;
         isError = message.is_error;
+        sessionId = message.session_id;
         inputTokens = message.usage.input_tokens ?? 0;
         outputTokens = message.usage.output_tokens ?? 0;
         cacheReadTokens = message.usage.cache_read_input_tokens ?? 0;
@@ -316,6 +339,7 @@ export async function askBrain(options: AskBrainOptions): Promise<AskBrainResult
     refusal,
     retrievalUsed: retrievedChunks.length > 0,
     retrievedChunks: retrievedChunkInfo,
+    sessionId,
   };
 
   // Best-effort: nunca debe romper ni retrasar la respuesta al usuario.

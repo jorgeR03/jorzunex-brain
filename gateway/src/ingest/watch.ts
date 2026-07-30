@@ -99,11 +99,18 @@ async function main(): Promise<void> {
   console.log(`[watch] Cargando embedder (${embedder.modelName})...`);
   await embedder.embed(["warmup"]); // fuerza la carga del modelo antes de vigilar (evita el retraso en el primer cambio real)
 
-  const watchRoots = [
-    path.join(REPO_ROOT, "docs"),
-    path.join(REPO_ROOT, "prompts"),
-    PROJECTS_ROOT,
-  ];
+  // PROJECTS_ROOT normalmente ya contiene a REPO_ROOT (este repo vive dentro
+  // de ProyectosJorZunex) — si se vigilaran también docs/ y prompts/ como
+  // raíces aparte, chokidar los observaría DOS VECES (una vez directo, otra
+  // como parte del árbol de PROJECTS_ROOT), y un mismo guardado puede emitir
+  // dos eventos separados en el tiempo (el escaneo de PROJECTS_ROOT es mucho
+  // más grande y tarda más en "ponerse al día"), disparando dos ingestas
+  // concurrentes del mismo archivo y un error de clave duplicada en Postgres.
+  // Por eso se filtran aquí las raíces ya cubiertas por otra raíz de la lista.
+  const candidateRoots = [path.join(REPO_ROOT, "docs"), path.join(REPO_ROOT, "prompts"), PROJECTS_ROOT];
+  const watchRoots = candidateRoots.filter(
+    (root) => !candidateRoots.some((other) => other !== root && root.startsWith(other + path.sep)),
+  );
 
   const timers = new Map<string, NodeJS.Timeout>();
   function debounced(absolutePath: string, fn: () => void): void {

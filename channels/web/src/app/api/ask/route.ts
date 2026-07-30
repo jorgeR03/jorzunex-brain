@@ -8,7 +8,7 @@
 const GATEWAY_URL = process.env.GATEWAY_HTTP_URL ?? "http://localhost:8787";
 
 export async function POST(request: Request) {
-  let body: { question?: string; outputMode?: "voice" | "text" };
+  let body: { question?: string; outputMode?: "voice" | "text"; sessionId?: string };
   try {
     body = await request.json();
   } catch {
@@ -28,6 +28,7 @@ export async function POST(request: Request) {
         channel: "web",
         outputMode: body.outputMode ?? "text",
         task: "default",
+        sessionId: body.sessionId,
       }),
     });
 

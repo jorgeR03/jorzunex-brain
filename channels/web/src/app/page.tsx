@@ -54,6 +54,13 @@ export default function BrainChatPage() {
     null,
   );
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bargeInRef = useRef<InstanceType<NonNullable<Window["SpeechRecognition"]>> | null>(null);
+  // ID de sesión del Claude Agent SDK: se guarda tras la primera respuesta y
+  // se reenvía en cada pregunta siguiente para que Atlas recuerde lo hablado
+  // antes en este mismo chat (sin esto, cada pregunta era una conversación
+  // nueva y aislada).
+  const sessionIdRef = useRef<string | undefined>(undefined);
   // Refs "espejo" del estado: los callbacks de SpeechRecognition/Synthesis
   // se registran una vez y necesitan leer el valor MÁS RECIENTE, no el
   // capturado en el render en que se creó el closure.
@@ -140,7 +147,65 @@ export default function BrainChatPage() {
     }
   }
 
+  /**
+   * Barge-in: escucha en PARALELO mientras Atlas habla. Al primer indicio de
+   * voz del usuario (incluso un resultado parcial), interrumpe. Pedido de
+   * Jorge: "si yo hablo él debería interrumpirse [solo]", sin clic manual.
+   *
+   * Límite honesto: el navegador cancela bastante bien el eco de su propio
+   * audio de salida (Chrome/Edge lo hacen por defecto), pero sin audífonos
+   * puede haber falsos positivos si el micrófono capta el altavoz. Con
+   * audífonos es prácticamente perfecto.
+   */
+  // Nº mínimo de caracteres reconocidos para considerar que es habla real del
+  // usuario y no ruido/eco de la propia voz de Atlas colándose en el micro.
+  const BARGE_IN_MIN_CHARS = 4;
+  // Periodo de gracia tras empezar a hablar antes de armar el barge-in — el
+  // primer instante de audio es el más propenso a "oírse a sí mismo".
+  const BARGE_IN_ARM_DELAY_MS = 900;
+
+  function startBargeInListener() {
+    if (typeof window === "undefined") return;
+    const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) return; // sin soporte: simplemente no hay barge-in, no rompe nada
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "es-ES";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    let armed = false;
+    const armTimer = setTimeout(() => {
+      armed = true;
+    }, BARGE_IN_ARM_DELAY_MS);
+
+    recognition.onresult = (event) => {
+      if (!armed) return; // todavía en periodo de gracia — ignorar
+      const transcript = event.results[event.results.length - 1][0].transcript.trim();
+      if (transcript.length < BARGE_IN_MIN_CHARS) return; // ruido/blip, no habla real
+      interruptAndListen();
+    };
+    recognition.onerror = () => {};
+    recognition.onend = () => {
+      clearTimeout(armTimer);
+      if (bargeInRef.current === recognition) bargeInRef.current = null;
+    };
+
+    bargeInRef.current = recognition;
+    try {
+      recognition.start();
+    } catch {
+      // Ya había una instancia activa — ignorar, no es crítico.
+    }
+  }
+
+  function stopBargeInListener() {
+    bargeInRef.current?.stop();
+    bargeInRef.current = null;
+  }
+
   function onSpeechEnd() {
+    stopBargeInListener();
     // Al terminar de hablar, si sigue en modo conversación, vuelve a
     // escuchar sola — el ciclo completo tipo Jarvis, sin tocar nada.
     if (conversationModeRef.current) {
@@ -156,7 +221,10 @@ export default function BrainChatPage() {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "es-ES";
     if (voiceRef.current) utterance.voice = voiceRef.current;
-    utterance.onstart = () => setAssistantState("speaking");
+    utterance.onstart = () => {
+      setAssistantState("speaking");
+      if (conversationModeRef.current) startBargeInListener();
+    };
     utterance.onend = onSpeechEnd;
     utterance.onerror = () => setAssistantState("idle");
     window.speechSynthesis.speak(utterance);
@@ -179,18 +247,43 @@ export default function BrainChatPage() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.onplay = () => setAssistantState("speaking");
+      currentAudioRef.current = audio;
+      audio.onplay = () => {
+        setAssistantState("speaking");
+        if (conversationModeRef.current) startBargeInListener();
+      };
       audio.onended = () => {
         URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
         onSpeechEnd();
       };
       audio.onerror = () => {
         URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
         speakWithBrowser(text);
       };
       await audio.play();
     } catch {
       speakWithBrowser(text); // ElevenLabs no configurado o falló — respaldo silencioso
+    }
+  }
+
+  /**
+   * Interrumpe a Atlas a mitad de la respuesta (clic en el orbe mientras
+   * habla) y pasa directo a escuchar — sin esperar a que termine de leer
+   * todo el texto. Pedido explícito de Jorge: "debería poder interrumpirlo
+   * sin que relea todo el texto".
+   */
+  function interruptAndListen() {
+    if (assistantStateRef.current !== "speaking") return;
+    stopBargeInListener();
+    currentAudioRef.current?.pause();
+    currentAudioRef.current = null;
+    window.speechSynthesis?.cancel();
+    if (conversationModeRef.current) {
+      startListening();
+    } else {
+      setAssistantState("idle");
     }
   }
 
@@ -204,9 +297,10 @@ export default function BrainChatPage() {
       const res = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, outputMode: "voice" }),
+        body: JSON.stringify({ question, outputMode: "voice", sessionId: sessionIdRef.current }),
       });
       const data = await res.json();
+      if (data.sessionId) sessionIdRef.current = data.sessionId;
 
       if (!res.ok) {
         setMessages((prev) => [
@@ -290,7 +384,16 @@ export default function BrainChatPage() {
       </header>
 
       <div className="mb-2 flex flex-col items-center gap-3 pt-2">
-        <Orb state={assistantState} />
+        <button
+          type="button"
+          onClick={interruptAndListen}
+          disabled={assistantState !== "speaking"}
+          className="rounded-full disabled:cursor-default"
+          style={{ cursor: assistantState === "speaking" ? "pointer" : "default" }}
+          title={assistantState === "speaking" ? "Clic para interrumpir" : undefined}
+        >
+          <Orb state={assistantState} />
+        </button>
         <span className="jorzunex-badge">
           <span
             className="h-1.5 w-1.5 rounded-full"

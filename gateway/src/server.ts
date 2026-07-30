@@ -37,6 +37,7 @@ interface AskRequestBody {
   allowFable?: boolean;
   topK?: number;
   useRetrieval?: boolean;
+  sessionId?: string;
 }
 
 app.post("/ask", async (req, res) => {
@@ -57,6 +58,7 @@ app.post("/ask", async (req, res) => {
       allowFable: body.allowFable ?? false,
       topK: body.topK,
       useRetrieval: body.useRetrieval,
+      sessionId: body.sessionId,
     });
     res.json(result);
   } catch (error) {
