@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { askBrain } from "./gateway.js";
 import { runDevTask, DevAgentError } from "./devAgent.js";
+import { synthesizeSpeech, isTtsConfigured, loadTtsConfig, TtsNotConfiguredError } from "./tts/elevenlabs.js";
 import type { TaskType } from "./modelRouter.js";
 import type { OutputMode } from "./channels/types.js";
 
@@ -113,8 +114,47 @@ app.post("/dev-task", async (req, res) => {
   }
 });
 
+interface TtsRequestBody {
+  text?: string;
+}
+
+/**
+ * Voz de alta calidad (ElevenLabs, ADR-0002 escalón C). Devuelve 501 si
+ * ELEVENLABS_API_KEY/ELEVENLABS_VOICE_ID no están configurados en
+ * gateway/.env — el canal (web) debe capturar ese caso y usar la voz del
+ * navegador como respaldo automático, sin mostrarle un error al usuario.
+ */
+app.get("/tts/status", (_req, res) => {
+  res.json({ configured: isTtsConfigured(loadTtsConfig()) });
+});
+
+app.post("/tts", async (req, res) => {
+  const body = req.body as TtsRequestBody;
+
+  if (!body.text || !body.text.trim()) {
+    res.status(400).json({ error: "El campo 'text' es obligatorio." });
+    return;
+  }
+
+  try {
+    const audio = await synthesizeSpeech(body.text);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.send(audio);
+  } catch (error) {
+    if (error instanceof TtsNotConfiguredError) {
+      res.status(501).json({ error: error.message, fallback: "browser" });
+      return;
+    }
+    res.status(502).json({
+      error: "Error al sintetizar voz con ElevenLabs.",
+      detail: error instanceof Error ? error.message : String(error),
+      fallback: "browser",
+    });
+  }
+});
+
 app.listen(PORT, () => {
   process.stdout.write(
-    `[brain-server] Escuchando en http://localhost:${PORT} (POST /ask, POST /dev-task, GET /health)\n`,
+    `[brain-server] Escuchando en http://localhost:${PORT} (POST /ask, POST /dev-task, POST /tts, GET /health)\n`,
   );
 });

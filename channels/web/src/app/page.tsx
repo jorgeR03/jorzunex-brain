@@ -140,24 +140,58 @@ export default function BrainChatPage() {
     }
   }
 
-  function speak(text: string) {
+  function onSpeechEnd() {
+    // Al terminar de hablar, si sigue en modo conversación, vuelve a
+    // escuchar sola — el ciclo completo tipo Jarvis, sin tocar nada.
+    if (conversationModeRef.current) {
+      setTimeout(() => startListening(), 250);
+    } else {
+      setAssistantState("idle");
+    }
+  }
+
+  function speakWithBrowser(text: string) {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "es-ES";
     if (voiceRef.current) utterance.voice = voiceRef.current;
     utterance.onstart = () => setAssistantState("speaking");
-    utterance.onend = () => {
-      // Al terminar de hablar, si sigue en modo conversación, vuelve a
-      // escuchar sola — el ciclo completo tipo Jarvis, sin tocar nada.
-      if (conversationModeRef.current) {
-        setTimeout(() => startListening(), 250);
-      } else {
-        setAssistantState("idle");
-      }
-    };
+    utterance.onend = onSpeechEnd;
     utterance.onerror = () => setAssistantState("idle");
     window.speechSynthesis.speak(utterance);
+  }
+
+  /**
+   * Voz de alta calidad (ElevenLabs, vía /api/tts) con respaldo automático
+   * a la voz del navegador si no está configurada o falla — el usuario
+   * nunca ve un error por esto, la conversación sigue igual.
+   */
+  async function speak(text: string) {
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error("tts-not-available");
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onplay = () => setAssistantState("speaking");
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        onSpeechEnd();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        speakWithBrowser(text);
+      };
+      await audio.play();
+    } catch {
+      speakWithBrowser(text); // ElevenLabs no configurado o falló — respaldo silencioso
+    }
   }
 
   async function sendQuestion(question: string) {
