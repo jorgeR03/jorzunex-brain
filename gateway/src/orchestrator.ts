@@ -5,6 +5,7 @@ import { resolveModel } from "./modelRouter.js";
 import { REPO_ROOT, loadConfig } from "./config.js";
 import { askBrain, type AskBrainOptions } from "./gateway.js";
 import { runDevTask, resolveProjectPath, type DevTaskResult } from "./devAgent.js";
+import { runCommercialTask, type CommercialTaskResult } from "./commercialAgent.js";
 import { createRetriever } from "./retriever/index.js";
 import { createJob, updateJob } from "./devJobs.js";
 
@@ -26,7 +27,7 @@ import { createJob, updateJob } from "./devJobs.js";
 const PROJECTS_ROOT = path.resolve(process.env.DEV_AGENT_PROJECTS_ROOT ?? "C:/Users/jorge/ProyectosJorZunex");
 const SELF_REPO_NAME = "Cerebro JorZunex";
 
-export type AtlasCapability = "ask" | "dev_task" | "dev_task_unresolved";
+export type AtlasCapability = "ask" | "dev_task" | "dev_task_unresolved" | "commercial";
 
 export interface AtlasOptions extends AskBrainOptions {
   /** Si true, clasifica y resuelve la tarea de desarrollo pero NO la ejecuta — para pruebas seguras. */
@@ -60,12 +61,20 @@ export interface AtlasResult {
     blockedCommands: string[];
     dryRun: boolean;
   };
+  /** Presente solo si capability es "commercial". */
+  commercialTask?: {
+    leadQuery: string;
+    product: string | null;
+    dryRun: boolean;
+  };
 }
 
 interface IntentClassification {
-  capability: "ask" | "dev_task";
+  capability: "ask" | "dev_task" | "commercial";
   project: string | null;
   instruction: string | null;
+  leadQuery: string | null;
+  product: string | null;
 }
 
 function listRealProjects(): string[] {
@@ -89,12 +98,13 @@ async function classifyIntent(question: string, projects: string[]): Promise<Int
   const model = resolveModel({ task: "route" });
 
   const systemPrompt = `Clasificas mensajes dirigidos a Atlas, el asistente interno de JorZunex. Responde EXCLUSIVAMENTE con un JSON válido (sin texto adicional, sin markdown) con esta forma exacta:
-{"capability":"ask"|"dev_task","project":"<nombre exacto de carpeta o null>","instruction":"<instrucción reformulada o null>"}
+{"capability":"ask"|"dev_task"|"commercial","project":"<nombre exacto de carpeta o null>","instruction":"<instrucción reformulada o null>","leadQuery":"<negocio/lead + ciudad si se mencionó, o null>","product":"<producto SaaS nombrado o null>"}
 
 Reglas:
-- "dev_task" SOLO si el usuario pide explícitamente crear/modificar/arreglar código, archivos o configuración de un proyecto real y nombra (o deja clarísimo) cuál.
-- Proyectos reales válidos (usa el nombre EXACTO de esta lista, o null si ninguno coincide claramente): ${projects.join(", ")}
-- Cualquier otra cosa (preguntas, pedir información, conversación general, saludos) es "ask".
+- "dev_task" SOLO si el usuario pide explícitamente crear/modificar/arreglar código, archivos o configuración de un proyecto real y nombra (o deja clarísimo) cuál. Usa "project"/"instruction", deja "leadQuery"/"product" en null.
+- "commercial" SOLO si el usuario pide investigar un lead/negocio/cliente potencial y/o redactar una propuesta o pitch de venta — nunca implica enviar nada, solo investigar y redactar un borrador. Usa "leadQuery" (nombre del negocio + ciudad si se dio) y opcionalmente "product" (uno de: PharmaPOS, PowerFit, RepartOS, MotoGest Pro, Portal Inmobiliario JorZunex/Zentrax, o null si no se nombró ninguno). Deja "project"/"instruction" en null.
+- Proyectos reales válidos para "dev_task" (usa el nombre EXACTO de esta lista, o null si ninguno coincide claramente): ${projects.join(", ")}
+- Cualquier otra cosa (preguntas, pedir información, conversación general, saludos) es "ask" — con todos los demás campos en null.
 - Ante la duda, responde "ask" — es la opción segura, nunca ejecuta cambios.
 - No incluyas explicaciones ni comentarios, solo el JSON.`;
 
@@ -127,12 +137,27 @@ Reglas:
       typeof parsed.project === "string" &&
       typeof parsed.instruction === "string"
     ) {
-      return { capability: "dev_task", project: parsed.project, instruction: parsed.instruction };
+      return {
+        capability: "dev_task",
+        project: parsed.project,
+        instruction: parsed.instruction,
+        leadQuery: null,
+        product: null,
+      };
+    }
+    if (parsed.capability === "commercial" && typeof parsed.leadQuery === "string") {
+      return {
+        capability: "commercial",
+        project: null,
+        instruction: null,
+        leadQuery: parsed.leadQuery,
+        product: typeof parsed.product === "string" ? parsed.product : null,
+      };
     }
   } catch {
     // JSON inválido o inesperado: cae al fallback seguro de abajo.
   }
-  return { capability: "ask", project: null, instruction: null };
+  return { capability: "ask", project: null, instruction: null, leadQuery: null, product: null };
 }
 
 /**
@@ -194,7 +219,11 @@ export async function orchestrateAtlas(rawOptions: AtlasOptions): Promise<AtlasR
   const intent =
     projects.length > 0
       ? await classifyIntent(question, projects)
-      : ({ capability: "ask", project: null, instruction: null } as const);
+      : ({ capability: "ask", project: null, instruction: null, leadQuery: null, product: null } as const);
+
+  if (intent.capability === "commercial" && intent.leadQuery) {
+    return startCommercialJob(intent.leadQuery, intent.product, options, routeModel, startedAt);
+  }
 
   if (intent.capability === "ask" || !intent.project || !intent.instruction) {
     const result = await askBrain(options);
@@ -261,7 +290,7 @@ export async function orchestrateAtlas(rawOptions: AtlasOptions): Promise<AtlasR
 
   const project = intent.project;
   const instruction = intent.instruction;
-  const job = createJob(project, instruction);
+  const job = createJob("dev_task", project, instruction);
 
   // Se lanza SIN esperar — el orquestador responde de inmediato con el
   // jobId y el canal (web) hace polling. Así la conversación no se queda
@@ -306,6 +335,78 @@ export async function orchestrateAtlas(rawOptions: AtlasOptions): Promise<AtlasR
     isError: false,
     durationMs: Date.now() - startedAt,
     devTask: { project, instruction, filesChanged: [], blockedCommands: [], dryRun: false },
+  };
+}
+
+/**
+ * Rama "commercial": mismo patrón que la de dev_task (dryRun síncrono,
+ * ejecución real como job async) pero delegando en `runCommercialTask` en
+ * vez de `runDevTask` — ver commercialAgent.ts para el guardarraíl de
+ * "nunca envía nada".
+ */
+async function startCommercialJob(
+  leadQuery: string,
+  product: string | null,
+  options: AtlasOptions,
+  routeModel: string,
+  startedAt: number,
+): Promise<AtlasResult> {
+  if (options.dryRun) {
+    return {
+      capability: "commercial",
+      answer:
+        `[dryRun] Investigaría el lead "${leadQuery}"${product ? ` para ${product}` : ""} y redactaría un ` +
+        `borrador de propuesta. No se escribió ningún archivo ni se tocó el CRM.`,
+      model: routeModel,
+      citations: [],
+      isError: false,
+      durationMs: Date.now() - startedAt,
+      commercialTask: { leadQuery, product, dryRun: true },
+    };
+  }
+
+  // Reutiliza el mismo Retriever que dev_task — la función no tiene nada
+  // específico de "dev", solo recibe una consulta de texto libre.
+  const contextNote = await retrieveContextForDevTask(leadQuery);
+  const job = createJob("commercial", leadQuery, leadQuery);
+
+  void (async () => {
+    try {
+      const result: CommercialTaskResult = await runCommercialTask({
+        leadQuery,
+        product: product ?? undefined,
+        contextNote,
+        allowOpus: options.allowOpus,
+      });
+      await appendCommercialActivityLog(leadQuery, result);
+      updateJob(job.id, {
+        status: result.isError ? "error" : "done",
+        finishedAt: Date.now(),
+        answer: result.draftText,
+        model: result.model,
+        errorMessage: result.errorMessage,
+      });
+    } catch (error) {
+      updateJob(job.id, {
+        status: "error",
+        finishedAt: Date.now(),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
+
+  return {
+    capability: "commercial",
+    status: "running",
+    jobId: job.id,
+    answer:
+      `Entendido — voy a investigar "${leadQuery}"${product ? ` para ${product}` : ""} y redactar un borrador ` +
+      `de propuesta en segundo plano. Te aviso cuando termine (queda para tu revisión, no se envía nada).`,
+    model: routeModel,
+    citations: [],
+    isError: false,
+    durationMs: Date.now() - startedAt,
+    commercialTask: { leadQuery, product, dryRun: false },
   };
 }
 
@@ -361,6 +462,51 @@ async function appendDevActivityLog(
   } catch (error) {
     process.stderr.write(
       `[orchestrator] Aviso: no se pudo escribir el log de actividad de "${project}" (${
+        error instanceof Error ? error.message : String(error)
+      })\n`,
+    );
+  }
+}
+
+const COMMERCIAL_ACTIVITY_LOG_DIR = path.join(REPO_ROOT, "docs", "wiki", "proyectos", "_actividad-comercial");
+
+/** Nombre de archivo seguro a partir del texto libre del lead (sin carpetas propias por proyecto, un lead no es un nombre de carpeta). */
+function slugifyLeadQuery(text: string): string {
+  const slug = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "lead";
+}
+
+/**
+ * Mismo patrón que appendDevActivityLog, pero para el pilar 3 (motor
+ * comercial): el borrador de propuesta/investigación completo queda aquí,
+ * que es exactamente el artefacto que Jorge debe revisar — no hay un
+ * "archivo de proyecto real" separado que tocar, a diferencia de dev_task.
+ */
+async function appendCommercialActivityLog(leadQuery: string, result: CommercialTaskResult): Promise<void> {
+  try {
+    await fs.promises.mkdir(COMMERCIAL_ACTIVITY_LOG_DIR, { recursive: true });
+    const filePath = path.join(COMMERCIAL_ACTIVITY_LOG_DIR, `${slugifyLeadQuery(leadQuery)}.md`);
+    const entry = `## ${new Date().toISOString()} — ${leadQuery}
+
+- Resultado: ${result.isError ? "ERROR" : "OK"}
+- Estado del lead en CRM (Agende de Ventas): ${result.leadStatus}${result.leadId ? ` (id ${result.leadId})` : ""}
+- CRM anotado (notes/nextFollowUp): ${result.crmPatched ? "sí" : "no"}
+
+${result.draftText}
+
+---
+
+`;
+    await fs.promises.appendFile(filePath, entry, "utf8");
+  } catch (error) {
+    process.stderr.write(
+      `[orchestrator] Aviso: no se pudo escribir el log comercial de "${leadQuery}" (${
         error instanceof Error ? error.message : String(error)
       })\n`,
     );
