@@ -2,8 +2,11 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { askBrain } from "./gateway.js";
+import { orchestrateAtlas } from "./orchestrator.js";
+import { getJob } from "./devJobs.js";
 import { runDevTask, DevAgentError } from "./devAgent.js";
 import { synthesizeSpeech, isTtsConfigured, loadTtsConfig, TtsNotConfiguredError } from "./tts/elevenlabs.js";
+import { getDefaultSttEngine } from "./stt/index.js";
 import type { TaskType } from "./modelRouter.js";
 import type { OutputMode } from "./channels/types.js";
 
@@ -69,6 +72,65 @@ app.post("/ask", async (req, res) => {
   }
 });
 
+interface AtlasRequestBody extends AskRequestBody {
+  /** Clasifica y resuelve la tarea de desarrollo pero no la ejecuta — para pruebas seguras. */
+  dryRun?: boolean;
+  /** Alternativas de transcripción del respaldo de navegador (ver orchestrator.ts, resolveTranscript). */
+  asrAlternatives?: string[];
+}
+
+/**
+ * Atlas Orchestrator (ADR-0003 §"Orden de construcción", paso 1): punto de
+ * entrada conversacional único. Decide internamente si la petición es una
+ * pregunta (askBrain) o una tarea de desarrollo sobre un proyecto real
+ * (devAgent) — el canal no elige el modo, solo le habla a Atlas. Nunca
+ * autoriza despliegue/publicación por sí solo (ver orchestrator.ts).
+ */
+app.post("/atlas", async (req, res) => {
+  const body = req.body as AtlasRequestBody;
+
+  if (!body.question || typeof body.question !== "string" || !body.question.trim()) {
+    res.status(400).json({ error: "El campo 'question' es obligatorio (string no vacío)." });
+    return;
+  }
+
+  try {
+    const result = await orchestrateAtlas({
+      question: body.question,
+      channel: body.channel ?? "web",
+      outputMode: body.outputMode ?? "text",
+      task: body.task ?? "default",
+      allowOpus: body.allowOpus ?? false,
+      allowFable: body.allowFable ?? false,
+      topK: body.topK,
+      useRetrieval: body.useRetrieval,
+      sessionId: body.sessionId,
+      dryRun: body.dryRun ?? false,
+      asrAlternatives: body.asrAlternatives,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: "Error interno al procesar la petición.",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+/**
+ * Estado de una tarea de desarrollo lanzada en segundo plano por /atlas
+ * (ver gateway/src/devJobs.ts). El canal (web) hace polling aquí hasta que
+ * `status` deje de ser "running".
+ */
+app.get("/atlas/jobs/:id", (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) {
+    res.status(404).json({ error: "Job no encontrado (puede haber expirado o el gateway se reinició)." });
+    return;
+  }
+  res.json(job);
+});
+
 interface DevTaskRequestBody {
   project?: string;
   instruction?: string;
@@ -116,6 +178,30 @@ app.post("/dev-task", async (req, res) => {
   }
 });
 
+/**
+ * Voz→texto local (Whisper vía @xenova/transformers, ADR-0002 Escalón B) —
+ * reemplaza a la Web Speech API del navegador como motor PRINCIPAL de
+ * reconocimiento (más robusto a hablar rápido/suave). Cuerpo: audio/wav
+ * crudo, no JSON — por eso usa `express.raw` solo en esta ruta, el
+ * `express.json()` global de arriba ya ignora cuerpos que no sean
+ * application/json.
+ */
+app.post("/stt", express.raw({ type: "audio/wav", limit: "10mb" }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    res.status(400).json({ error: "Cuerpo de audio vacío o inválido (se espera audio/wav)." });
+    return;
+  }
+  try {
+    const text = await getDefaultSttEngine().transcribe(req.body);
+    res.json({ text });
+  } catch (error) {
+    res.status(502).json({
+      error: "Error al transcribir audio con Whisper local.",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 interface TtsRequestBody {
   text?: string;
 }
@@ -157,6 +243,17 @@ app.post("/tts", async (req, res) => {
 
 app.listen(PORT, () => {
   process.stdout.write(
-    `[brain-server] Escuchando en http://localhost:${PORT} (POST /ask, POST /dev-task, POST /tts, GET /health)\n`,
+    `[brain-server] Escuchando en http://localhost:${PORT} (POST /atlas, POST /ask, POST /dev-task, POST /stt, POST /tts, GET /health)\n`,
   );
+  // Precarga el modelo Whisper en segundo plano (sin bloquear el arranque
+  // del servidor) para que no haya un retraso extra en la primera petición
+  // de voz real — mismo patrón que el precalentado del embedder en watch.ts.
+  getDefaultSttEngine()
+    .warmup()
+    .then(() => process.stdout.write("[brain-server] Motor STT (Whisper) precargado.\n"))
+    .catch((error) =>
+      process.stderr.write(
+        `[brain-server] Aviso: no se pudo precargar el motor STT (${error instanceof Error ? error.message : String(error)})\n`,
+      ),
+    );
 });

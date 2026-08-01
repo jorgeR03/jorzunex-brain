@@ -56,6 +56,9 @@ export default function BrainChatPage() {
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const bargeInRef = useRef<InstanceType<NonNullable<Window["SpeechRecognition"]>> | null>(null);
+  // Limpieza (parar micro/AudioContext) del turno de escucha con Whisper en
+  // curso, si lo hay — necesario para poder cortarlo desde stopConversation().
+  const whisperCleanupRef = useRef<(() => void) | null>(null);
   // ID de sesión del Claude Agent SDK: se guarda tras la primera respuesta y
   // se reenvía en cada pregunta siguiente para que Atlas recuerde lo hablado
   // antes en este mismo chat (sin esto, cada pregunta era una conversación
@@ -89,6 +92,206 @@ export default function BrainChatPage() {
     };
   }, []);
 
+  /**
+   * Punto de entrada para empezar un turno de escucha: intenta primero el
+   * motor principal (Whisper local, gateway/src/stt/) grabando audio real
+   * con detección de silencio (VAD); si falla por lo que sea (sin permiso
+   * de micrófono, gateway caído, etc.) cae automáticamente al respaldo de
+   * navegador (`startListening()`, Web Speech API) para ESE turno, sin
+   * romper el modo conversación. ADR-0002 Escalón B.
+   */
+  async function beginListeningTurn() {
+    try {
+      await startListeningWhisper();
+    } catch {
+      startListening();
+    }
+  }
+
+  function stopWhisperListener() {
+    whisperCleanupRef.current?.();
+    whisperCleanupRef.current = null;
+  }
+
+  // Umbral de energía (RMS) para considerar que el usuario empezó a hablar.
+  const WHISPER_VAD_START_RMS = 0.02;
+  // Silencio sostenido tras el que se da por terminado el turno y se manda a transcribir.
+  const WHISPER_VAD_SILENCE_MS = 1200;
+  // Tope duro de seguridad por si el VAD nunca detecta silencio.
+  const WHISPER_MAX_RECORDING_MS = 20000;
+  // Grabaciones más cortas que esto se descartan como ruido/blip, no habla real.
+  const WHISPER_MIN_RECORDING_MS = 300;
+
+  function concatFloat32(chunks: Float32Array[]): Float32Array {
+    const total = chunks.reduce((sum, c) => sum + c.length, 0);
+    const result = new Float32Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return result;
+  }
+
+  /** Re-muestrea a 16kHz (lo que espera Whisper) — interpolación lineal simple, de sobra para voz. */
+  function resampleTo16k(input: Float32Array, sourceRate: number): Float32Array {
+    if (sourceRate === 16000) return input;
+    const ratio = sourceRate / 16000;
+    const newLength = Math.round(input.length / ratio);
+    const output = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      const srcIndex = i * ratio;
+      const i0 = Math.floor(srcIndex);
+      const i1 = Math.min(i0 + 1, input.length - 1);
+      const frac = srcIndex - i0;
+      output[i] = input[i0] * (1 - frac) + input[i1] * frac;
+    }
+    return output;
+  }
+
+  /** Codifica PCM 16-bit mono como WAV — header estándar, sin dependencias. */
+  function encodeWav(samples: Float32Array, sampleRate: number): Blob {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    function writeString(offset: number, str: string) {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+
+    writeString(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  async function transcribeAndSend(wavBlob: Blob) {
+    try {
+      const res = await fetch("/api/stt", {
+        method: "POST",
+        headers: { "Content-Type": "audio/wav" },
+        body: wavBlob,
+      });
+      const data = await res.json();
+      if (!res.ok || !data.text || !String(data.text).trim()) {
+        throw new Error(data.error ?? "stt-vacio");
+      }
+      setInput("");
+      void sendQuestion(data.text);
+    } catch {
+      // Whisper falló para este turno (gateway caído, modelo sin cargar,
+      // etc.) — respaldo silencioso al navegador, sin romper la conversación.
+      startListening();
+    }
+  }
+
+  /**
+   * Graba el turno de voz del usuario con detección de silencio (VAD por
+   * energía) y lo manda a transcribir con Whisper. A diferencia de la Web
+   * Speech API no es streaming: hay un pequeño retraso (uno-pocos segundos)
+   * tras dejar de hablar antes de que el texto llegue — a cambio, Whisper
+   * es mucho más robusto a hablar rápido o suave.
+   */
+  async function startListeningWhisper(): Promise<void> {
+    if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia || !window.AudioContext) {
+      throw new Error("Captura de audio no disponible en este navegador.");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0; // el processor necesita llegar a destination para disparar onaudioprocess, pero sin sonar
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    let recording = false;
+    let started = false;
+    let startedAt = 0;
+    let silenceStartedAt: number | null = null;
+    let finished = false;
+    const chunks: Float32Array[] = [];
+
+    function cleanup() {
+      processor.disconnect();
+      silentGain.disconnect();
+      source.disconnect();
+      stream.getTracks().forEach((track) => track.stop());
+      audioCtx.close().catch(() => undefined);
+    }
+
+    function finish() {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      if (whisperCleanupRef.current === cleanup) whisperCleanupRef.current = null;
+
+      const durationMs = started ? Date.now() - startedAt : 0;
+      if (!recording || durationMs < WHISPER_MIN_RECORDING_MS || chunks.length === 0) {
+        // No hubo habla real (blip/silencio) — vuelve a escuchar sin mandar nada.
+        if (conversationModeRef.current) void beginListeningTurn();
+        return;
+      }
+
+      const full = concatFloat32(chunks);
+      const resampled = resampleTo16k(full, audioCtx.sampleRate);
+      const wavBlob = encodeWav(resampled, 16000);
+      void transcribeAndSend(wavBlob);
+    }
+
+    processor.onaudioprocess = (event) => {
+      if (finished) return;
+      const input = event.inputBuffer.getChannelData(0);
+      let sumSquares = 0;
+      for (let i = 0; i < input.length; i++) sumSquares += input[i] * input[i];
+      const rms = Math.sqrt(sumSquares / input.length);
+
+      if (!recording) {
+        if (rms > WHISPER_VAD_START_RMS) {
+          recording = true;
+          started = true;
+          startedAt = Date.now();
+          setAssistantState("listening");
+        } else {
+          return;
+        }
+      }
+
+      chunks.push(input.slice());
+
+      if (rms > WHISPER_VAD_START_RMS) {
+        silenceStartedAt = null;
+      } else {
+        if (silenceStartedAt === null) silenceStartedAt = Date.now();
+        if (Date.now() - silenceStartedAt >= WHISPER_VAD_SILENCE_MS) finish();
+      }
+
+      if (started && Date.now() - startedAt >= WHISPER_MAX_RECORDING_MS) finish();
+    };
+
+    source.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+
+    whisperCleanupRef.current = cleanup;
+    setAssistantState("listening");
+  }
+
   function startListening() {
     if (typeof window === "undefined") return;
     const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
@@ -102,11 +305,18 @@ export default function BrainChatPage() {
     recognition.lang = "es-ES";
     recognition.continuous = false;
     recognition.interimResults = false;
+    // Varias alternativas (no solo la mejor) para que el orquestador pueda
+    // corregir/elegir la más coherente — este es el respaldo de navegador,
+    // se usa solo cuando Whisper (motor principal) no está disponible.
+    recognition.maxAlternatives = 5;
 
     recognition.onresult = (event) => {
-      const transcript = event.results[event.results.length - 1][0].transcript;
+      const result = event.results[event.results.length - 1];
+      const transcript = result[0].transcript;
+      const alternatives: string[] = [];
+      for (let i = 0; i < result.length; i++) alternatives.push(result[i].transcript);
       setInput("");
-      void sendQuestion(transcript);
+      void sendQuestion(transcript, alternatives.length > 1 ? alternatives : undefined);
     };
     recognition.onerror = () => {
       // "no-speech" (silencio) es normal en modo conversación: se reintenta
@@ -133,6 +343,7 @@ export default function BrainChatPage() {
     setConversationMode(false);
     conversationModeRef.current = false;
     recognitionRef.current?.stop();
+    stopWhisperListener();
     window.speechSynthesis?.cancel();
     setAssistantState("idle");
   }
@@ -143,7 +354,7 @@ export default function BrainChatPage() {
     } else {
       setConversationMode(true);
       conversationModeRef.current = true;
-      startListening();
+      void beginListeningTurn();
     }
   }
 
@@ -159,10 +370,19 @@ export default function BrainChatPage() {
    */
   // Nº mínimo de caracteres reconocidos para considerar que es habla real del
   // usuario y no ruido/eco de la propia voz de Atlas colándose en el micro.
-  const BARGE_IN_MIN_CHARS = 4;
+  // Subido de 4 a 7: con 4, cualquier ruido puntual (silla, tos, golpe) que
+  // el navegador "alucinaba" como una palabra corta ya disparaba el barge-in
+  // (reportado por Jorge: "escucha el más mínimo ruido y se calla").
+  const BARGE_IN_MIN_CHARS = 7;
   // Periodo de gracia tras empezar a hablar antes de armar el barge-in — el
   // primer instante de audio es el más propenso a "oírse a sí mismo".
   const BARGE_IN_ARM_DELAY_MS = 900;
+  // Nº de resultados consecutivos que deben superar BARGE_IN_MIN_CHARS antes
+  // de interrumpir de verdad — un ruido puntual da como mucho 1 resultado
+  // "alto"; habla real del usuario da varios seguidos (la transcripción
+  // interina va creciendo). Filtra falsos positivos sin perder capacidad de
+  // respuesta ante habla genuina.
+  const BARGE_IN_CONFIRMATIONS_NEEDED = 2;
 
   function startBargeInListener() {
     if (typeof window === "undefined") return;
@@ -175,6 +395,7 @@ export default function BrainChatPage() {
     recognition.interimResults = true;
 
     let armed = false;
+    let consecutiveHits = 0;
     const armTimer = setTimeout(() => {
       armed = true;
     }, BARGE_IN_ARM_DELAY_MS);
@@ -182,7 +403,12 @@ export default function BrainChatPage() {
     recognition.onresult = (event) => {
       if (!armed) return; // todavía en periodo de gracia — ignorar
       const transcript = event.results[event.results.length - 1][0].transcript.trim();
-      if (transcript.length < BARGE_IN_MIN_CHARS) return; // ruido/blip, no habla real
+      if (transcript.length < BARGE_IN_MIN_CHARS) {
+        consecutiveHits = 0; // ruido/blip puntual, no habla real — reinicia el conteo
+        return;
+      }
+      consecutiveHits++;
+      if (consecutiveHits < BARGE_IN_CONFIRMATIONS_NEEDED) return;
       interruptAndListen();
     };
     recognition.onerror = () => {};
@@ -209,7 +435,7 @@ export default function BrainChatPage() {
     // Al terminar de hablar, si sigue en modo conversación, vuelve a
     // escuchar sola — el ciclo completo tipo Jarvis, sin tocar nada.
     if (conversationModeRef.current) {
-      setTimeout(() => startListening(), 250);
+      setTimeout(() => void beginListeningTurn(), 250);
     } else {
       setAssistantState("idle");
     }
@@ -281,23 +507,66 @@ export default function BrainChatPage() {
     currentAudioRef.current = null;
     window.speechSynthesis?.cancel();
     if (conversationModeRef.current) {
-      startListening();
+      void beginListeningTurn();
     } else {
       setAssistantState("idle");
     }
   }
 
-  async function sendQuestion(question: string) {
+  /**
+   * Sondea el estado de una tarea de desarrollo lanzada en segundo plano
+   * (gateway/src/devJobs.ts) hasta que termine. No bloquea nada: la
+   * conversación sigue funcionando normal mientras tanto (assistantState no
+   * se toca aquí). Al terminar, el resultado se agrega al chat siempre, y
+   * solo se habla en voz si Atlas está en reposo — si el usuario ya está en
+   * medio de otra interacción, no se le interrumpe.
+   */
+  function pollDevJob(jobId: string, attempt = 0) {
+    const MAX_ATTEMPTS = 300; // ~20 min a 4s por intento
+    if (attempt >= MAX_ATTEMPTS) return;
+
+    setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/atlas/jobs/${jobId}`);
+        const job = await res.json();
+
+        if (!res.ok || job.status === "running") {
+          if (res.ok) pollDevJob(jobId, attempt + 1);
+          return;
+        }
+
+        const isError = job.status === "error";
+        const text = isError
+          ? `Tarea de desarrollo en "${job.project}" fallida: ${job.errorMessage ?? "error desconocido"}.`
+          : `Terminé en "${job.project}": ${job.answer}`;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "brain", text, model: job.model, isError },
+        ]);
+        if (assistantStateRef.current === "idle") speak(text);
+      } catch {
+        pollDevJob(jobId, attempt + 1);
+      }
+    }, 4000);
+  }
+
+  async function sendQuestion(question: string, asrAlternatives?: string[]) {
     if (!question.trim()) return;
     setMessages((prev) => [...prev, { role: "user", text: question }]);
     setInput("");
     setAssistantState("thinking");
 
     try {
-      const res = await fetch("/api/ask", {
+      const res = await fetch("/api/atlas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, outputMode: "voice", sessionId: sessionIdRef.current }),
+        body: JSON.stringify({
+          question,
+          outputMode: "voice",
+          sessionId: sessionIdRef.current,
+          asrAlternatives,
+        }),
       });
       const data = await res.json();
       if (data.sessionId) sessionIdRef.current = data.sessionId;
@@ -308,7 +577,7 @@ export default function BrainChatPage() {
           { role: "brain", text: data.error ?? "Error desconocido.", isError: true },
         ]);
         setAssistantState(conversationModeRef.current ? "listening" : "idle");
-        if (conversationModeRef.current) setTimeout(() => startListening(), 250);
+        if (conversationModeRef.current) setTimeout(() => void beginListeningTurn(), 250);
         return;
       }
 
@@ -318,6 +587,10 @@ export default function BrainChatPage() {
         { role: "brain", text: answer, citations: data.citations, model: data.model },
       ]);
       speak(answer);
+
+      if (data.status === "running" && data.jobId) {
+        pollDevJob(data.jobId);
+      }
     } catch (error) {
       setMessages((prev) => [
         ...prev,

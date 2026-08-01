@@ -42,35 +42,64 @@ export class TtsNotConfiguredError extends Error {
 }
 
 /**
+ * Nº de reintentos ante fallos transitorios (429 rate-limit del plan
+ * gratuito, o 5xx puntuales) antes de rendirse — observado en uso real:
+ * ráfagas de conversación (turnos seguidos, interrupciones) a veces topan
+ * con el límite de concurrencia de la cuenta gratuita de ElevenLabs, y un
+ * solo reintento corto basta para recuperarse sin caer a la voz del
+ * navegador (que suena claramente peor y es un salto de calidad brusco).
+ */
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 400;
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Sintetiza `text` como audio MP3 real. Lanza TtsNotConfiguredError si
  * faltan credenciales (el llamador debe capturarla y usar el fallback del
- * navegador, no mostrar un error al usuario). Cualquier otro fallo de la
- * API de ElevenLabs se propaga con el detalle devuelto por ellos.
+ * navegador, no mostrar un error al usuario). Reintenta fallos transitorios
+ * (ver MAX_RETRIES); cualquier otro fallo de la API de ElevenLabs se
+ * propaga con el detalle devuelto por ellos.
  */
 export async function synthesizeSpeech(text: string, config: TtsConfig = loadTtsConfig()): Promise<Buffer> {
   if (!isTtsConfigured(config)) {
     throw new TtsNotConfiguredError();
   }
 
-  const response = await fetch(`${ELEVENLABS_TTS_URL}/${config.voiceId}`, {
-    method: "POST",
-    headers: {
-      "xi-api-key": config.apiKey!,
-      "Content-Type": "application/json",
-      Accept: "audio/mpeg",
-    },
-    body: JSON.stringify({
-      text,
-      model_id: DEFAULT_MODEL,
-      voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-    }),
-  });
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) await sleep(RETRY_DELAY_MS);
+
+    const response = await fetch(`${ELEVENLABS_TTS_URL}/${config.voiceId}`, {
+      method: "POST",
+      headers: {
+        "xi-api-key": config.apiKey!,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: DEFAULT_MODEL,
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    });
+
+    if (response.ok) {
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    }
+
     const detail = await response.text().catch(() => "");
-    throw new Error(`ElevenLabs respondió ${response.status}: ${detail.slice(0, 300)}`);
+    lastError = new Error(`ElevenLabs respondió ${response.status}: ${detail.slice(0, 300)}`);
+    if (!isRetryableStatus(response.status)) throw lastError;
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  throw lastError ?? new Error("ElevenLabs: fallo desconocido tras reintentos.");
 }

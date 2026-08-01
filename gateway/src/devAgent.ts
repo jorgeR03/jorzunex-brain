@@ -35,6 +35,14 @@ export interface DevTaskOptions {
   /** Escala a claude-opus-5 para tareas de código especialmente difíciles. */
   allowOpus?: boolean;
   maxTurns?: number;
+  /**
+   * Contexto relevante recuperado del cerebro (RAG sobre docs/wiki/proyectos)
+   * antes de ejecutar esta tarea — sin esto, devAgent arranca sin saber nada
+   * de lo que el resto del sistema ya sabe de este proyecto (decisiones,
+   * convenciones, incidentes previos). Opcional y aditivo: si se omite, el
+   * comportamiento es idéntico al de antes.
+   */
+  contextNote?: string;
 }
 
 export interface DevTaskResult {
@@ -95,9 +103,13 @@ export async function runDevTask(opts: DevTaskOptions): Promise<DevTaskResult> {
   const bashCommandsRun: string[] = [];
   const blockedCommands: string[] = [];
 
+  const contextBlock = opts.contextNote
+    ? `\n\nContexto relevante recuperado del cerebro (wiki/proyectos/ADRs — puede no ser exhaustivo, verifica con Read/Glob/Grep si algo es crítico):\n"""\n${opts.contextNote}\n"""`
+    : "";
+
   const systemPrompt = `Eres Atlas, operando en MODO DESARROLLADOR sobre el proyecto "${opts.project}" de JorZunex (carpeta: ${projectPath}).
 
-Tienes acceso de lectura Y escritura (Read, Glob, Grep, Write, Edit, Bash) SOLO dentro de esta carpeta de proyecto. Haz exactamente lo que pide la instrucción del usuario, sin ampliar el alcance ni "aprovechar para mejorar" cosas que no se pidieron.
+Tienes acceso de lectura Y escritura (Read, Glob, Grep, Write, Edit, Bash) SOLO dentro de esta carpeta de proyecto. Haz exactamente lo que pide la instrucción del usuario, sin ampliar el alcance ni "aprovechar para mejorar" cosas que no se pidieron.${contextBlock}
 
 Reglas:
 - Si necesitas ejecutar 'git push', desplegar (Vercel/Railway/Netlify/Fly), o publicar un paquete, y NO se te ha autorizado explícitamente, el sistema bloqueará ese comando automáticamente — no es un error tuyo. Cuando eso pase, detente ahí, no insistas, y en tu respuesta final dile al usuario exactamente qué comando quedó pendiente de aprobación y por qué.

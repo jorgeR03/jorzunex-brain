@@ -8,7 +8,7 @@ export {};
 
 interface SpeechRecognitionEventLike extends Event {
   results: {
-    [index: number]: { [index: number]: { transcript: string }; isFinal: boolean };
+    [index: number]: { [index: number]: { transcript: string }; isFinal: boolean; length: number };
     length: number;
   };
 }
@@ -17,6 +17,8 @@ interface SpeechRecognitionLike extends EventTarget {
   lang: string;
   continuous: boolean;
   interimResults: boolean;
+  /** Nº de alternativas de transcripción a devolver por resultado — usado para el respaldo con corrección por IA (ver orchestrator.ts, resolveTranscript). */
+  maxAlternatives: number;
   start(): void;
   stop(): void;
   onresult: ((event: SpeechRecognitionEventLike) => void) | null;
